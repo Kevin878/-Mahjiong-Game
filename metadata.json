@@ -1,0 +1,5 @@
+{
+  "name": "Zen Mahjong",
+  "description": "A simplified single-player Mahjong game against 3 AI opponents. Features a beautiful table interface and Taiwan Mahjong (16-tile) rules.",
+  "requestFramePermissions": []
+}
