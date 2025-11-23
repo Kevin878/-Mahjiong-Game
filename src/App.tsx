@@ -377,7 +377,7 @@ const App: React.FC = () => {
                : currentPlayerAbs !== null
                  ? (currentPlayerAbs === gameState.myPlayerId
                       ? '現在輪到你出牌'
-                      : `等待由玩家 ${currentPlayerName} 出牌`)
+                      : `等待由 ${currentPlayerName} 出牌`)
                  : '等待中…'}
            </div>
          </div>
