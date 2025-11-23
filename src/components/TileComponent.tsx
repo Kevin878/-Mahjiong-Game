@@ -1,5 +1,5 @@
 import React from 'react';
-import { Tile, Suit } from '../types';
+import { Tile, Suit } from '../../shared/types';
 
 interface TileProps {
   tile: Tile;

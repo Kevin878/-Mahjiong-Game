@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Player, Tile, GameState, GamePhase, ActionType, Meld } from './types';
-import { HUMAN_PLAYER } from './constants';
+import { Player, Tile, GameState, GamePhase, ActionType, Meld } from '../shared/types';
+import { HUMAN_PLAYER } from '../shared/constants';
 import TileComponent from './components/TileComponent';
 import TableCenter from './components/TableCenter';
 import ActionPanel from './components/ActionPanel';
@@ -13,7 +13,7 @@ interface ClientState extends GameState {
 
 // Initialize Socket (Assuming server runs on localhost:3001)
 // In production, change this URL to your server IP
-const URL = "http://localhost:3001";
+const URL = `http://${window.location.hostname}:3001`;
 const socket: Socket = io(URL, { autoConnect: false });
 
 const App: React.FC = () => {
@@ -21,7 +21,8 @@ const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState(socket.connected);
   const [inRoom, setInRoom] = useState(false);
   const [gameState, setGameState] = useState<ClientState | null>(null);
-  const [selectedTileIndex, setSelectedTileIndex] = useState<number | null>(null);
+  const [selectedTileId, setSelectedTileId] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
 
   // Lobby State
   const [roomId, setRoomId] = useState("room1");
@@ -30,25 +31,34 @@ const App: React.FC = () => {
 
   // --- Socket Event Listeners ---
   useEffect(() => {
+    // 防止 HMR 或頁面重載後仍保留舊連線
+    if (socket.connected) {
+      socket.disconnect();
+    }
+
     function onConnect() {
       setIsConnected(true);
       setErrorMsg("");
+      setIsConnecting(false);
     }
 
     function onDisconnect() {
       setIsConnected(false);
       setInRoom(false);
       setGameState(null);
+      setIsConnecting(false);
     }
 
     function onGameStateUpdate(newState: GameState, myPid: Player) {
       console.log("Received State Update:", newState);
       setGameState({ ...newState, myPlayerId: myPid });
       setInRoom(true);
+      setIsConnecting(false);
     }
 
     function onError(msg: string) {
       setErrorMsg(msg);
+      setIsConnecting(false);
     }
 
     socket.on('connect', onConnect);
@@ -61,6 +71,7 @@ const App: React.FC = () => {
       socket.off('disconnect', onDisconnect);
       socket.off('updateState', onGameStateUpdate);
       socket.off('errorMsg', onError);
+      socket.disconnect();
     };
   }, []);
 
@@ -71,20 +82,25 @@ const App: React.FC = () => {
       setErrorMsg("請輸入名字");
       return;
     }
+    setErrorMsg("");
+    setIsConnecting(true);
     socket.connect();
     socket.emit('joinRoom', { roomId, playerName });
   };
 
-  const handleHumanDiscard = (tileIndex: number) => {
+  const handleHumanDiscard = (tileId: string) => {
     if (!gameState || gameState.myPlayerId === null) return;
+    const hand = gameState.players[gameState.myPlayerId];
+    const tileIndex = hand.findIndex(t => t.id === tileId);
+    if (tileIndex === -1) return;
     
     // Validation: Is it my turn?
     if (gameState.currentPlayer !== gameState.myPlayerId) return;
     if (gameState.phase !== GamePhase.Discard) return;
 
     // Double click logic
-    if (selectedTileIndex !== tileIndex) {
-        setSelectedTileIndex(tileIndex);
+    if (selectedTileId !== tileId) {
+        setSelectedTileId(tileId);
         return;
     }
 
@@ -94,7 +110,7 @@ const App: React.FC = () => {
       type: 'Discard', 
       tileIndex 
     });
-    setSelectedTileIndex(null);
+    setSelectedTileId(null);
   };
 
   const handleHumanAction = (action: ActionType) => {
@@ -170,23 +186,29 @@ const App: React.FC = () => {
 
     // 1. Bottom (Me)
     if (relativePosition === Player.Bottom) {
+      // Put freshly drawn tile to the far right with a gap
+      const isMyTurn = isMe && gameState.currentPlayer === gameState.myPlayerId && gameState.phase === GamePhase.Discard;
+      const lastDrawnId = isMyTurn ? gameState.lastDrawnTile?.id : undefined;
+      const displayHand = isMyTurn && lastDrawnId
+        ? [
+            ...hand.filter(t => t.id !== lastDrawnId),
+            hand.find(t => t.id === lastDrawnId) as Tile
+          ].filter(Boolean)
+        : hand;
+
       return (
          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-6 items-end z-30">
             <div className="flex items-end">
-               {hand.map((tile, index) => {
-                  // Highlight newly drawn tile if it's my turn to discard
-                  const isLastDrawn = isMe && 
-                                      gameState.lastDrawnTile?.id === tile.id && 
-                                      gameState.phase === GamePhase.Discard &&
-                                      gameState.currentPlayer === gameState.myPlayerId;
-                                      
-                  const marginClass = isLastDrawn ? 'ml-4 md:ml-6' : '';
+               {displayHand.map((tile, index) => {
+                  const isLastDrawn = isMyTurn && gameState.lastDrawnTile?.id === tile.id;
+                  // Separate freshly drawn tile from the rest
+                  const gapClass = isLastDrawn ? 'ml-4 md:ml-6' : '';
                   return (
-                     <div key={tile.id} className={marginClass}>
+                     <div key={tile.id} className={`transition-all ${gapClass}`}>
                        <TileComponent 
                          tile={tile} 
-                         isSelected={selectedTileIndex === index}
-                         onClick={() => isMe ? handleHumanDiscard(index) : undefined}
+                         isSelected={selectedTileId === tile.id}
+                         onClick={() => isMe ? handleHumanDiscard(tile.id) : undefined}
                          size="xl"
                        />
                      </div>
@@ -255,7 +277,7 @@ const App: React.FC = () => {
   if (!inRoom || !gameState) {
     return (
       <div className="w-full h-screen bg-slate-900 flex flex-col items-center justify-center text-white">
-         <h1 className="text-6xl font-serif mb-8 text-yellow-400">Zen Mahjong Online</h1>
+         <h1 className="text-6xl mb-8 text-yellow-400" style={{ fontFamily: 'var(--heading-font)' }}>麻將大亂鬥</h1>
          
          <div className="bg-slate-800 p-8 rounded-xl shadow-2xl w-96 flex flex-col gap-4 border border-slate-700">
             <div>
@@ -263,7 +285,10 @@ const App: React.FC = () => {
               <input 
                 type="text" 
                 value={playerName}
-                onChange={e => setPlayerName(e.target.value)}
+                onChange={e => {
+                  setPlayerName(e.target.value);
+                  setErrorMsg("");
+                }}
                 className="w-full p-3 bg-slate-900 rounded border border-slate-600 text-white focus:ring-2 focus:ring-green-500 outline-none"
                 placeholder="輸入您的暱稱"
               />
@@ -273,7 +298,10 @@ const App: React.FC = () => {
               <input 
                 type="text" 
                 value={roomId}
-                onChange={e => setRoomId(e.target.value)}
+                onChange={e => {
+                  setRoomId(e.target.value);
+                  setErrorMsg("");
+                }}
                 className="w-full p-3 bg-slate-900 rounded border border-slate-600 text-white focus:ring-2 focus:ring-green-500 outline-none"
                 placeholder="Room ID"
               />
@@ -283,10 +311,10 @@ const App: React.FC = () => {
 
             <button 
               onClick={joinRoom}
-              disabled={!playerName}
+              disabled={!playerName || isConnecting}
               className="mt-4 w-full py-3 bg-green-600 hover:bg-green-500 rounded-lg font-bold text-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isConnected ? "加入房間" : "連線中..."}
+              {isConnecting ? "連線中..." : "加入房間"}
             </button>
          </div>
       </div>
@@ -321,6 +349,10 @@ const App: React.FC = () => {
 
   // Also need to rotate the `currentPlayer` prop so the highlight shows on the correct visual seat
   const relativeCurrentPlayer = getRelativePlayer(gameState.currentPlayer);
+  const currentPlayerAbs = getAbsolutePlayerFromRelative(relativeCurrentPlayer);
+  const currentPlayerName = currentPlayerAbs !== null
+    ? (gameState.playerNames?.[currentPlayerAbs] || `玩家${currentPlayerAbs}`)
+    : null;
   
   // Also rotate `lastDiscardedTile.fromPlayer`
   const rotatedLastDiscard = gameState.lastDiscardedTile ? {
@@ -336,7 +368,20 @@ const App: React.FC = () => {
           Room: {roomId} | You: {playerName}
        </div>
 
-       <div className="absolute inset-4 md:inset-12">
+      <div className="absolute inset-4 md:inset-12">
+         {/* Turn indicator */}
+         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-40">
+           <div className="px-4 py-3 bg-black/70 text-white rounded-2xl text-base md:text-lg shadow-lg border border-white/10 backdrop-blur-sm">
+             {gameState.phase === GamePhase.Action && gameState.lastDiscardedTile
+               ? '請等待玩家進行操作'
+               : currentPlayerAbs !== null
+                 ? (currentPlayerAbs === gameState.myPlayerId
+                      ? '現在輪到你出牌'
+                      : `等待由玩家 ${currentPlayerName} 出牌`)
+                 : '等待中…'}
+           </div>
+         </div>
+
           <TableCenter 
             discards={rotatedDiscards} 
             currentPlayer={relativeCurrentPlayer} // Pass visual current player
@@ -362,7 +407,7 @@ const App: React.FC = () => {
               {gameState.winner === gameState.myPlayerId 
                 ? "胡牌! You Win!" 
                 : gameState.winner !== null 
-                  ? `Player ${gameState.winner} Wins!` 
+                  ? `${gameState.playerNames?.[gameState.winner] || `玩家${gameState.winner}`} 獲勝`
                   : "Draw!"}
             </h1>
             <button onClick={resetGame} className="px-8 py-3 bg-green-600 hover:bg-green-500 rounded-full text-xl font-bold shadow-lg transition-all">

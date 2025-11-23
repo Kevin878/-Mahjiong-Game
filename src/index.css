@@ -1,5 +1,16 @@
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700&display=swap');
 
+/* MaSaFont (from https://github.com/max32002/masafont) */
+@font-face {
+  font-family: 'MaSaFont';
+  src: url('/src/font/MasaFont-Bold.ttf') format('truetype');
+  font-display: swap;
+}
+
+:root {
+  --heading-font: 'MaSaFont', 'Noto Sans SC', sans-serif;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

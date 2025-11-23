@@ -54,6 +54,7 @@ export interface GameState {
   discards: {
     [key in Player]: Tile[];
   };
+  playerNames: { [key in Player]: string };
   currentPlayer: Player;
   phase: GamePhase;
   winner: Player | null;

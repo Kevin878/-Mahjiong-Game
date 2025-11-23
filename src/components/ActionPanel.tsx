@@ -1,5 +1,5 @@
 import React from 'react';
-import { ActionType } from '../types';
+import { ActionType } from '../../shared/types';
 
 interface ActionPanelProps {
   onAction: (action: ActionType) => void;

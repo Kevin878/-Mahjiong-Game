@@ -1,5 +1,5 @@
 import React from 'react';
-import { Tile, Player } from '../types';
+import { Tile, Player } from '../../shared/types';
 import TileComponent from './TileComponent';
 
 interface TableCenterProps {

@@ -2,7 +2,6 @@ import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
-// 假設您將邏輯檔案放到了 server/shared 資料夾
 import { GameState, Player, GamePhase, ActionType, Tile } from '../shared/types';
 import { 
   generateDeck, 
@@ -35,6 +34,8 @@ interface Room {
     name: string;
     seatIndex: number;
   }[];
+  pendingClaimers: Player[]; // players who can respond to last discard
+  lastDiscarder: Player | null;
 }
 
 const rooms: Record<string, Room> = {};
@@ -60,6 +61,12 @@ const createInitialGameState = (): GameState => {
     [Player.Top]: [],
     [Player.Left]: [],
   };
+  const playerNames: GameState['playerNames'] = {
+    [Player.Bottom]: '',
+    [Player.Right]: '',
+    [Player.Top]: '',
+    [Player.Left]: '',
+  };
 
   // Deal 16 tiles per player (Taiwan Mahjong hand size) then draw 1 for the starting player
   for (let i = 0; i < 16; i++) {
@@ -70,6 +77,12 @@ const createInitialGameState = (): GameState => {
         if (tile) players[p as Player].push(tile);
       });
   }
+
+  // Sort initial hands for all players
+  sortSeatHand(players, Player.Bottom);
+  sortSeatHand(players, Player.Right);
+  sortSeatHand(players, Player.Top);
+  sortSeatHand(players, Player.Left);
 
   const startingPlayer = Player.Bottom;
   const drawnTile = deck.pop() ?? null;
@@ -82,6 +95,7 @@ const createInitialGameState = (): GameState => {
     players,
     melds,
     discards,
+    playerNames,
     currentPlayer: startingPlayer,
     phase: GamePhase.Discard,
     winner: null,
@@ -99,7 +113,7 @@ io.on('connection', (socket) => {
     socket.join(roomId);
 
     if (!rooms[roomId]) {
-      rooms[roomId] = { id: roomId, gameState: null, players: [] };
+      rooms[roomId] = { id: roomId, gameState: null, players: [], pendingClaimers: [], lastDiscarder: null };
     }
 
     const room = rooms[roomId];
@@ -109,6 +123,12 @@ io.on('connection', (socket) => {
     if (!existingPlayer) {
       if (room.players.length >= 4) {
         socket.emit('errorMsg', '房間已滿');
+        return;
+      }
+      // 同房名稱不可重複
+      const duplicateName = room.players.find(p => p.name === playerName);
+      if (duplicateName) {
+        socket.emit('errorMsg', '此名稱已被使用，請換一個暱稱');
         return;
       }
       const seatIndex = room.players.length;
@@ -121,7 +141,7 @@ io.on('connection', (socket) => {
     // 檢查是否滿 4 人，如果是，開始遊戲
     if (room.players.length === 4 && !room.gameState) {
       console.log(`Room ${roomId} starting game!`);
-      room.gameState = createInitialGameState(); // 您需要實作這個
+      room.gameState = createInitialGameState();
       broadcastState(roomId);
     } else if (room.gameState) {
       // 斷線重連或中途加入 (Spectator)
@@ -149,39 +169,110 @@ io.on('connection', (socket) => {
       gs.discards[player.seatIndex].push(discarded);
       gs.lastDiscardedTile = { tile: discarded, fromPlayer: player.seatIndex };
       gs.lastDrawnTile = null;
-
-      // Rotate to next player and draw a tile
-      const nextPlayer = ((player.seatIndex + 1) % 4) as Player;
-      gs.currentPlayer = nextPlayer;
-      const nextDraw = gs.deck.pop() ?? null;
-      if (nextDraw) {
-        gs.players[nextPlayer].push(nextDraw);
-        gs.lastDrawnTile = nextDraw;
-      }
-
-      // Check win after draw
-      const hasWin = nextDraw
-        ? checkWin(gs.players[nextPlayer], gs.melds[nextPlayer], nextDraw)
-        : false;
-      if (hasWin) {
-        gs.winner = nextPlayer;
-        gs.phase = GamePhase.GameOver;
-      } else if (gs.deck.length === 0) {
-        gs.phase = GamePhase.GameOver;
-      } else {
-        gs.phase = GamePhase.Discard;
-      }
-
-      gs.turnCount += 1;
+      gs.phase = GamePhase.Action;
       gs.availableActions = [];
+      room.lastDiscarder = player.seatIndex;
+      sortSeatHand(gs.players, player.seatIndex);
+
+      // 計算可以回應的玩家（除自己外），只保留真正有動作的人
+      const claimers = [Player.Bottom, Player.Right, Player.Top, Player.Left]
+        .filter(p => p !== player.seatIndex)
+        // evaluate actions without requiring pendingClaimers set yet
+        .filter(p => computeAvailableActions(gs, p, room, /*includePass*/ false, /*skipPendingCheck*/ true).length > 0);
+
+      room.pendingClaimers = claimers;
+
+      // 如果沒有人有動作，直接輪到下一位摸牌
+      if (room.pendingClaimers.length === 0) {
+        room.lastDiscarder = null;
+        advanceTurnAfterPass(gs, player.seatIndex);
+      }
 
       broadcastState(roomId);
+      return;
     }
 
-    // 處理動作 (吃/碰/槓/胡)
-    else {
-      // ... 這裡需要將您 App.tsx 的 executeActionState 邏輯搬過來 ...
+    // 處理暗槓（自己回合且有 4 張相同的牌）
+    if (type === ActionType.AnKong && gs.currentPlayer === player.seatIndex && gs.phase === GamePhase.Discard) {
+      const ankongs = getPossibleAnKongs(gs.players[player.seatIndex]);
+      if (ankongs.length === 0) return;
+      const target = ankongs[0]; // 簡化：若多組，取第一組
+
+      // 找出四張同值同花的實際牌物件
+      const tilesToRemove = gs.players[player.seatIndex]
+        .filter(t => t.suit === target.suit && t.value === target.value)
+        .slice(0, 4);
+      if (tilesToRemove.length < 4) return;
+
+      tilesToRemove.forEach(t => removeOneTile(gs.players[player.seatIndex], t));
+      gs.melds[player.seatIndex].push({ type: ActionType.AnKong, tiles: tilesToRemove });
+      gs.lastDiscardedTile = null;
+      gs.lastDrawnTile = null;
+      gs.availableActions = [];
+
+      // 暗槓後補摸一張
+      drawForPlayer(gs, player.seatIndex);
       broadcastState(roomId);
+      return;
+    }
+
+    // 處理動作 (吃/碰/槓/胡/Pass)
+    if (gs.phase !== GamePhase.Action || !gs.lastDiscardedTile) return;
+    if (!room.pendingClaimers.includes(player.seatIndex)) return;
+
+    const discardTile = gs.lastDiscardedTile.tile;
+    const hand = gs.players[player.seatIndex];
+
+    if (type === ActionType.Pass) {
+      room.pendingClaimers = room.pendingClaimers.filter(p => p !== player.seatIndex);
+      if (room.pendingClaimers.length === 0) {
+        const from = gs.lastDiscardedTile.fromPlayer;
+        room.lastDiscarder = null;
+        gs.lastDiscardedTile = null;
+        advanceTurnAfterPass(gs, from);
+      }
+      broadcastState(roomId);
+      return;
+    }
+
+    if (type === ActionType.Hu) {
+      const canHu = checkWin(hand, gs.melds[player.seatIndex], discardTile);
+      if (canHu) {
+        gs.winner = player.seatIndex;
+        gs.phase = GamePhase.GameOver;
+        room.pendingClaimers = [];
+        room.lastDiscarder = null;
+      }
+      broadcastState(roomId);
+      return;
+    }
+
+    if (type === ActionType.Pong && canPong(hand, discardTile)) {
+      meldFromDiscard(gs, player.seatIndex, discardTile, 2, ActionType.Pong);
+      finalizeClaimTurn(gs, room, player.seatIndex);
+      broadcastState(roomId);
+      return;
+    }
+
+    if (type === ActionType.Kong && canKong(hand, discardTile)) {
+      meldFromDiscard(gs, player.seatIndex, discardTile, 3, ActionType.Kong);
+      drawForPlayer(gs, player.seatIndex);
+      finalizeClaimTurn(gs, room, player.seatIndex);
+      broadcastState(roomId);
+      return;
+    }
+
+    if (type === ActionType.Chi && room.lastDiscarder !== null) {
+      const isNext = ((room.lastDiscarder + 1) % 4) === player.seatIndex;
+      const chiOptions = canChi(hand, discardTile);
+      if (isNext && chiOptions.length > 0) {
+        const useTiles = chiOptions[0]; // 簡化：自動使用第一組
+        useTiles.forEach(t => removeOneTile(gs.players[player.seatIndex], t));
+        gs.melds[player.seatIndex].push({ type: ActionType.Chi, tiles: [discardTile, ...useTiles] });
+        finalizeClaimTurn(gs, room, player.seatIndex);
+        broadcastState(roomId);
+        return;
+      }
     }
   });
 
@@ -190,13 +281,12 @@ io.on('connection', (socket) => {
     Object.values(rooms).forEach(room => {
       const idx = room.players.findIndex(p => p.socketId === socket.id);
       if (idx !== -1) {
+        // Any player leaves: disconnect everyone else and remove the room
         room.players.splice(idx, 1);
-        if (room.players.length === 0) {
-          delete rooms[room.id];
-        } else {
-          room.gameState = null; // clear state so a fresh game can start when room refills
-          broadcastState(room.id);
-        }
+        room.players.forEach(p => {
+          io.to(p.socketId).disconnectSockets(true);
+        });
+        delete rooms[room.id];
       }
     });
   });
@@ -204,6 +294,10 @@ io.on('connection', (socket) => {
   socket.on('resetGame', (roomId: string) => {
     const room = rooms[roomId];
     if (!room) return;
+    if (room.players.length < 4) {
+      io.to(socket.id).emit('errorMsg', '需要 4 位玩家才能開始遊戲');
+      return;
+    }
     room.gameState = createInitialGameState();
     broadcastState(roomId);
   });
@@ -215,14 +309,128 @@ function broadcastState(roomId: string) {
   if (!room || !room.gameState) return;
 
   room.players.forEach(p => {
-    // 傳送給每個人時，告訴他們 "myPlayerId" 是多少，讓前端能計算相對視角
-    io.to(p.socketId).emit('updateState', room.gameState, p.seatIndex);
+    // 為每個玩家計算他可用的動作
+    const availableActions = room.gameState!.phase === GamePhase.Action
+      ? computeAvailableActions(room.gameState!, p.seatIndex, room)
+      : (p.seatIndex === room.gameState!.currentPlayer ? room.gameState!.availableActions : []);
+    const stateForPlayer: GameState = { 
+      ...room.gameState!, 
+      availableActions,
+      playerNames: buildPlayerNames(room),
+    };
+    io.to(p.socketId).emit('updateState', stateForPlayer, p.seatIndex);
   });
 }
 
 const PORT = 3001;
-const HOST = '127.0.0.1';
+const HOST = '0.0.0.0';
 
 server.listen(PORT, HOST, () => {
   console.log(`SERVER RUNNING ON http://${HOST}:${PORT}`);
 });
+
+// --- helpers ---
+
+function computeAvailableActions(gs: GameState, seat: Player, room: Room, includePass = true, skipPendingCheck = false): ActionType[] {
+  if (gs.phase !== GamePhase.Action || !gs.lastDiscardedTile) return [];
+  if (!skipPendingCheck && !room.pendingClaimers.includes(seat)) return [];
+
+  const tile = gs.lastDiscardedTile.tile;
+  const hand = gs.players[seat];
+  const actions: ActionType[] = [];
+
+  if (checkWin(hand, gs.melds[seat], tile)) actions.push(ActionType.Hu);
+  if (canKong(hand, tile)) actions.push(ActionType.Kong);
+  if (canPong(hand, tile)) actions.push(ActionType.Pong);
+
+  const isNext = room.lastDiscarder !== null && ((room.lastDiscarder + 1) % 4) === seat;
+  if (isNext && canChi(hand, tile).length > 0) {
+    actions.push(ActionType.Chi);
+  }
+
+  if (includePass && actions.length > 0) {
+    actions.push(ActionType.Pass);
+  }
+  return actions;
+}
+
+function advanceTurnAfterPass(gs: GameState, fromPlayer: Player) {
+  const nextPlayer = ((fromPlayer + 1) % 4) as Player;
+  gs.currentPlayer = nextPlayer;
+  gs.phase = GamePhase.Draw;
+  gs.lastDiscardedTile = null;
+
+  drawForPlayer(gs, nextPlayer);
+}
+
+function drawForPlayer(gs: GameState, seat: Player) {
+  const draw = gs.deck.pop() ?? null;
+  if (draw) {
+    gs.players[seat].push(draw);
+    sortSeatHand(gs.players, seat);
+    gs.lastDrawnTile = draw;
+    // 自摸檢查
+    const win = checkWin(gs.players[seat], gs.melds[seat], draw);
+    if (win) {
+      gs.winner = seat;
+      gs.phase = GamePhase.GameOver;
+      return;
+    }
+  }
+
+  if (gs.deck.length === 0) {
+    gs.phase = GamePhase.GameOver;
+    return;
+  }
+
+  gs.phase = GamePhase.Discard;
+  gs.turnCount += 1;
+  // 自己回合檢查暗槓
+  const ankongOptions = getPossibleAnKongs(gs.players[seat]);
+  gs.availableActions = ankongOptions.length > 0 ? [ActionType.AnKong] : [];
+}
+
+function meldFromDiscard(gs: GameState, seat: Player, tile: Tile, needMatches: number, type: ActionType) {
+  const hand = gs.players[seat];
+  const matches = hand.filter(t => t.suit === tile.suit && t.value === tile.value).slice(0, needMatches);
+  matches.forEach(t => removeOneTile(hand, t));
+  sortSeatHand(gs.players, seat);
+  gs.melds[seat].push({ type, tiles: [tile, ...matches] });
+  gs.lastDiscardedTile = null;
+  gs.lastDrawnTile = null;
+  gs.currentPlayer = seat;
+  gs.phase = GamePhase.Discard;
+  gs.availableActions = [];
+}
+
+function removeOneTile(hand: Tile[], target: Tile) {
+  const idx = hand.findIndex(t => t.id === target.id);
+  if (idx >= 0) hand.splice(idx, 1);
+}
+
+function finalizeClaimTurn(gs: GameState, room: Room, seat: Player) {
+  room.pendingClaimers = [];
+  room.lastDiscarder = null;
+  // 若槓後已胡或牌山空，直接返回
+  if (gs.phase === GamePhase.GameOver) return;
+  gs.currentPlayer = seat;
+  gs.phase = GamePhase.Discard;
+  gs.availableActions = [];
+}
+
+function sortSeatHand(players: GameState['players'], seat: Player) {
+  players[seat] = sortHand(players[seat]);
+}
+
+function buildPlayerNames(room: Room): GameState['playerNames'] {
+  const names: GameState['playerNames'] = {
+    [Player.Bottom]: '',
+    [Player.Right]: '',
+    [Player.Top]: '',
+    [Player.Left]: '',
+  };
+  room.players.forEach(p => {
+    names[p.seatIndex] = p.name || '';
+  });
+  return names;
+}
