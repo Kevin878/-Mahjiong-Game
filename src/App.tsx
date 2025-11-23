@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { Player, Tile, GameState, GamePhase, ActionType, Meld } from '../shared/types';
 import { HUMAN_PLAYER } from '../shared/constants';
 import TileComponent from './components/TileComponent';
 import TableCenter from './components/TableCenter';
 import ActionPanel from './components/ActionPanel';
+import bgMusic from './music/never-gonna-give-you-up-official-video-4k-remaster.mp3';
 
 // --- Types for Multiplayer ---
 interface ClientState extends GameState {
@@ -28,6 +29,14 @@ const App: React.FC = () => {
   const [roomId, setRoomId] = useState("room1");
   const [playerName, setPlayerName] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
+  const [musicError, setMusicError] = useState("");
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const shouldPlayMusic = inRoom && !!gameState;
+  const [customMusicUrl, setCustomMusicUrl] = useState<string | null>(null);
+  const [customMusicName, setCustomMusicName] = useState<string>("");
+  const currentAudioSrcRef = useRef<string | null>(null);
+  const lobbyFileInputRef = useRef<HTMLInputElement | null>(null);
+  const inGameFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // --- Socket Event Listeners ---
   useEffect(() => {
@@ -74,6 +83,79 @@ const App: React.FC = () => {
       socket.disconnect();
     };
   }, []);
+
+  // --- Background Music ---
+  useEffect(() => {
+    // Create the audio element once
+    if (!audioRef.current) {
+      audioRef.current = new Audio(bgMusic);
+      audioRef.current.loop = true;
+      audioRef.current.volume = 0.35;
+    }
+    const audio = audioRef.current;
+    return () => {
+      audio.pause();
+      audio.currentTime = 0;
+    };
+  }, []);
+
+  // Revoke object URLs when switching or unmounting
+  useEffect(() => {
+    return () => {
+      const urlCreator = window.URL || window.webkitURL;
+      if (customMusicUrl && urlCreator?.revokeObjectURL) urlCreator.revokeObjectURL(customMusicUrl);
+    };
+  }, [customMusicUrl]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const newSrc = customMusicUrl || bgMusic;
+    if (currentAudioSrcRef.current !== newSrc) {
+      currentAudioSrcRef.current = newSrc;
+      audio.src = newSrc;
+      audio.load();
+    }
+
+    if (shouldPlayMusic) {
+      audio.play().catch(err => {
+        console.warn('Unable to start background music:', err);
+        setMusicError("瀏覽器封鎖了自動播放，請點擊螢幕後再試");
+      });
+    } else {
+      audio.pause();
+      audio.currentTime = 0;
+    }
+  }, [customMusicUrl, shouldPlayMusic]);
+
+  const handleMusicUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.includes('audio')) {
+      setMusicError("請選擇音訊檔（建議 MP3）");
+      return;
+    }
+    const urlCreator = window.URL || window.webkitURL;
+    if (!urlCreator?.createObjectURL) {
+      setMusicError("瀏覽器不支援檔案預覽，請改用支援 createObjectURL 的環境");
+      return;
+    }
+    const url = urlCreator.createObjectURL(file);
+    setCustomMusicUrl(url);
+    setCustomMusicName(file.name);
+    setMusicError("");
+  };
+
+  const resetMusic = () => {
+    setCustomMusicUrl(null);
+    setCustomMusicName("");
+    setMusicError("");
+    if (lobbyFileInputRef.current) lobbyFileInputRef.current.value = "";
+    if (inGameFileInputRef.current) inGameFileInputRef.current.value = "";
+  };
+
+  const currentMusicLabel = customMusicName || "Never Gonna Give You Up（預設）";
 
   // --- Actions ---
 
@@ -149,6 +231,14 @@ const App: React.FC = () => {
     // If Me=2, Relative=0(Bottom). We want 2. formula: (Relative + Me) % 4
     // (0 + 2) % 4 = 2.
     return (relativePos + gameState.myPlayerId) % 4 as Player;
+  };
+  
+  const getPlayerLabel = (relativePos: Player): string | null => {
+    const abs = getAbsolutePlayerFromRelative(relativePos);
+    if (abs === null) return null;
+    const name = gameState?.playerNames?.[abs];
+    const fallback = abs === gameState?.myPlayerId ? "你" : `玩家${abs}`;
+    return name || fallback;
   };
 
   // --- Rendering ---
@@ -277,7 +367,7 @@ const App: React.FC = () => {
   if (!inRoom || !gameState) {
     return (
       <div className="w-full h-screen bg-slate-900 flex flex-col items-center justify-center text-white">
-         <h1 className="text-6xl mb-8 text-yellow-400" style={{ fontFamily: 'var(--heading-font)' }}>麻將大亂鬥</h1>
+         <h1 className="text-6xl mb-8 text-yellow-400" style={{ fontFamily: 'var(--heading-font)' }}>麻John大亂鬥</h1>
          
          <div className="bg-slate-800 p-8 rounded-xl shadow-2xl w-96 flex flex-col gap-4 border border-slate-700">
             <div>
@@ -305,6 +395,28 @@ const App: React.FC = () => {
                 className="w-full p-3 bg-slate-900 rounded border border-slate-600 text-white focus:ring-2 focus:ring-green-500 outline-none"
                 placeholder="Room ID"
               />
+            </div>
+            
+            <div className="border-t border-slate-700 pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <label className="block text-sm text-gray-400">背景音樂</label>
+                <button 
+                  onClick={resetMusic}
+                  disabled={!customMusicUrl}
+                  className="text-xs px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  使用預設
+                </button>
+              </div>
+              <input 
+                type="file" 
+                accept="audio/mpeg,audio/mp3,audio/*" 
+                onChange={handleMusicUpload}
+                ref={lobbyFileInputRef}
+                className="w-full text-sm text-gray-300 file:mr-3 file:px-3 file:py-2 file:rounded file:border-0 file:bg-green-700 file:text-white hover:file:bg-green-600"
+              />
+              {musicError && <div className="text-red-400 text-xs mt-1">{musicError}</div>}
+              <div className="mt-2 text-xs text-gray-400 line-clamp-1">目前：{currentMusicLabel}</div>
             </div>
             
             {errorMsg && <div className="text-red-400 text-sm">{errorMsg}</div>}
@@ -366,6 +478,47 @@ const App: React.FC = () => {
        {/* Room Info */}
        <div className="absolute top-4 left-4 text-white/50 z-50 text-xs">
           Room: {roomId} | You: {playerName}
+       </div>
+       <div className="absolute top-4 right-4 z-50 text-xs text-white">
+          <div className="bg-black/50 border border-white/10 rounded-lg px-3 py-2 flex flex-col gap-1 shadow">
+            <div className="text-white/70">背景音樂</div>
+            <div className="text-white line-clamp-1 max-w-[180px]" title={currentMusicLabel}>{currentMusicLabel}</div>
+            <div className="flex items-center gap-2">
+              <label className="px-2 py-1 rounded bg-green-700 hover:bg-green-600 cursor-pointer text-[11px]">
+                重新選擇
+                <input 
+                  type="file" 
+                  accept="audio/mpeg,audio/mp3,audio/*" 
+                  onChange={handleMusicUpload} 
+                  ref={inGameFileInputRef}
+                  className="hidden" 
+                />
+              </label>
+              <button 
+                onClick={resetMusic} 
+                disabled={!customMusicUrl}
+                className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                預設
+              </button>
+            </div>
+          </div>
+       </div>
+       
+       {/* Player name overlays (rotated to your perspective) */}
+       <div className="absolute inset-0 pointer-events-none z-40 text-white">
+         <div className="absolute bottom-28 left-1/2 -translate-x-1/2 px-3 py-1 rounded-lg bg-black/50 border border-white/10">
+           {getPlayerLabel(Player.Bottom)}
+         </div>
+         <div className="absolute top-6 left-1/2 -translate-x-1/2 px-3 py-1 rounded-lg bg-black/50 border border-white/10">
+           {getPlayerLabel(Player.Top)}
+         </div>
+         <div className="absolute left-6 top-1/2 -translate-y-1/2 px-3 py-1 rounded-lg bg-black/50 border border-white/10">
+           {getPlayerLabel(Player.Left)}
+         </div>
+         <div className="absolute right-6 top-1/2 -translate-y-1/2 px-3 py-1 rounded-lg bg-black/50 border border-white/10">
+           {getPlayerLabel(Player.Right)}
+         </div>
        </div>
 
       <div className="absolute inset-4 md:inset-12">
