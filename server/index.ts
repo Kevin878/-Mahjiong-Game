@@ -3,7 +3,7 @@ import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 // 假設您將邏輯檔案放到了 server/shared 資料夾
-import { GameState, Player, GamePhase, ActionType, Tile } from './shared/types';
+import { GameState, Player, GamePhase, ActionType, Tile } from '../shared/types';
 import { 
   generateDeck, 
   sortHand, 
@@ -13,7 +13,7 @@ import {
   canKong, 
   getPossibleAnKongs,
   getPossibleBuKongs 
-} from './shared/utils/mahjongLogic';
+} from '../shared/utils/mahjongLogic';
 
 const app = express();
 app.use(cors());
@@ -41,10 +41,55 @@ const rooms: Record<string, Room> = {};
 
 // Helper: Initial Game State (Same as your frontend initGame logic)
 const createInitialGameState = (): GameState => {
-  // ... (使用您的 initGame 邏輯，產生洗好的牌局) ...
-  // 回傳完整的 GameState 物件
-  // 記得這裡沒有 "human player" 的概念，所有玩家都是平等的
-  return {} as GameState; // 佔位符
+  const deck = generateDeck();
+  const players: GameState['players'] = {
+    [Player.Bottom]: [],
+    [Player.Right]: [],
+    [Player.Top]: [],
+    [Player.Left]: [],
+  };
+  const melds: GameState['melds'] = {
+    [Player.Bottom]: [],
+    [Player.Right]: [],
+    [Player.Top]: [],
+    [Player.Left]: [],
+  };
+  const discards: GameState['discards'] = {
+    [Player.Bottom]: [],
+    [Player.Right]: [],
+    [Player.Top]: [],
+    [Player.Left]: [],
+  };
+
+  // Deal 16 tiles per player (Taiwan Mahjong hand size) then draw 1 for the starting player
+  for (let i = 0; i < 16; i++) {
+    Object.values(Player)
+      .filter(p => typeof p === 'number')
+      .forEach(p => {
+        const tile = deck.pop();
+        if (tile) players[p as Player].push(tile);
+      });
+  }
+
+  const startingPlayer = Player.Bottom;
+  const drawnTile = deck.pop() ?? null;
+  if (drawnTile) {
+    players[startingPlayer].push(drawnTile);
+  }
+
+  return {
+    deck,
+    players,
+    melds,
+    discards,
+    currentPlayer: startingPlayer,
+    phase: GamePhase.Discard,
+    winner: null,
+    lastDrawnTile: drawnTile,
+    lastDiscardedTile: null,
+    turnCount: 0,
+    availableActions: [],
+  };
 };
 
 io.on('connection', (socket) => {
@@ -97,9 +142,38 @@ io.on('connection', (socket) => {
     if (type === 'Discard' && typeof tileIndex === 'number') {
       if (gs.currentPlayer !== player.seatIndex) return; // 不是你的回合
       
-      // 執行出牌邏輯 (processDiscard)
-      // 更新 gs.players, gs.discards, gs.phase...
-      // ... 這裡需要將您 App.tsx 的 handleHumanDiscard 邏輯搬過來 ...
+      const hand = gs.players[player.seatIndex];
+      if (tileIndex < 0 || tileIndex >= hand.length) return;
+
+      const [discarded] = hand.splice(tileIndex, 1);
+      gs.discards[player.seatIndex].push(discarded);
+      gs.lastDiscardedTile = { tile: discarded, fromPlayer: player.seatIndex };
+      gs.lastDrawnTile = null;
+
+      // Rotate to next player and draw a tile
+      const nextPlayer = ((player.seatIndex + 1) % 4) as Player;
+      gs.currentPlayer = nextPlayer;
+      const nextDraw = gs.deck.pop() ?? null;
+      if (nextDraw) {
+        gs.players[nextPlayer].push(nextDraw);
+        gs.lastDrawnTile = nextDraw;
+      }
+
+      // Check win after draw
+      const hasWin = nextDraw
+        ? checkWin(gs.players[nextPlayer], gs.melds[nextPlayer], nextDraw)
+        : false;
+      if (hasWin) {
+        gs.winner = nextPlayer;
+        gs.phase = GamePhase.GameOver;
+      } else if (gs.deck.length === 0) {
+        gs.phase = GamePhase.GameOver;
+      } else {
+        gs.phase = GamePhase.Discard;
+      }
+
+      gs.turnCount += 1;
+      gs.availableActions = [];
 
       broadcastState(roomId);
     }
@@ -113,7 +187,25 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
-    // 處理玩家離線邏輯 (暫停遊戲或踢出)
+    Object.values(rooms).forEach(room => {
+      const idx = room.players.findIndex(p => p.socketId === socket.id);
+      if (idx !== -1) {
+        room.players.splice(idx, 1);
+        if (room.players.length === 0) {
+          delete rooms[room.id];
+        } else {
+          room.gameState = null; // clear state so a fresh game can start when room refills
+          broadcastState(room.id);
+        }
+      }
+    });
+  });
+
+  socket.on('resetGame', (roomId: string) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    room.gameState = createInitialGameState();
+    broadcastState(roomId);
   });
 });
 
@@ -128,6 +220,9 @@ function broadcastState(roomId: string) {
   });
 }
 
-server.listen(3001, () => {
-  console.log('SERVER RUNNING ON PORT 3001');
+const PORT = 3001;
+const HOST = '127.0.0.1';
+
+server.listen(PORT, HOST, () => {
+  console.log(`SERVER RUNNING ON http://${HOST}:${PORT}`);
 });
