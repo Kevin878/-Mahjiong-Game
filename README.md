@@ -71,9 +71,6 @@ Mahjiong-Game/
 - 名稱唯一：同房內暱稱不可重複，否則會收到錯誤訊息。
 - 斷線策略：任何一人離線，房間即被移除並踢除其餘玩家。
 
-## 字型
-- 大廳標題使用 `MasaFont-Bold.ttf`（放在專案根目錄），在 `src/index.css` 中以 `@font-face` 引入。
-
 ## 開發注意
 - 前後端共用的型別與麻將邏輯在 `shared/` 目錄，若更新邏輯請同步前後端。
 - Tailwind 已透過 PostCSS 整合；樣式入口為 `src/index.css`。
