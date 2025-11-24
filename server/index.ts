@@ -36,6 +36,8 @@ interface Room {
   }[];
   pendingClaimers: Player[]; // players who can respond to last discard
   lastDiscarder: Player | null;
+  actionTimer: NodeJS.Timeout | null;
+  avatars: { [key in Player]?: string };
 }
 
 const rooms: Record<string, Room> = {};
@@ -62,6 +64,12 @@ const createInitialGameState = (): GameState => {
     [Player.Left]: [],
   };
   const playerNames: GameState['playerNames'] = {
+    [Player.Bottom]: '',
+    [Player.Right]: '',
+    [Player.Top]: '',
+    [Player.Left]: '',
+  };
+  const playerAvatars: GameState['playerAvatars'] = {
     [Player.Bottom]: '',
     [Player.Right]: '',
     [Player.Top]: '',
@@ -96,6 +104,7 @@ const createInitialGameState = (): GameState => {
     melds,
     discards,
     playerNames,
+    playerAvatars,
     currentPlayer: startingPlayer,
     phase: GamePhase.Discard,
     winner: null,
@@ -113,7 +122,7 @@ io.on('connection', (socket) => {
     socket.join(roomId);
 
     if (!rooms[roomId]) {
-      rooms[roomId] = { id: roomId, gameState: null, players: [], pendingClaimers: [], lastDiscarder: null };
+      rooms[roomId] = { id: roomId, gameState: null, players: [], pendingClaimers: [], lastDiscarder: null, actionTimer: null, avatars: {} };
     }
 
     const room = rooms[roomId];
@@ -142,6 +151,7 @@ io.on('connection', (socket) => {
     if (room.players.length === 4 && !room.gameState) {
       console.log(`Room ${roomId} starting game!`);
       room.gameState = createInitialGameState();
+      room.gameState.playerAvatars = buildPlayerAvatars(room);
       broadcastState(roomId);
     } else if (room.gameState) {
       // 斷線重連或中途加入 (Spectator)
@@ -186,6 +196,9 @@ io.on('connection', (socket) => {
       if (room.pendingClaimers.length === 0) {
         room.lastDiscarder = null;
         advanceTurnAfterPass(gs, player.seatIndex);
+        clearActionTimer(room);
+      } else {
+        startActionTimer(roomId, room, player.seatIndex);
       }
 
       broadcastState(roomId);
@@ -230,6 +243,7 @@ io.on('connection', (socket) => {
         room.lastDiscarder = null;
         gs.lastDiscardedTile = null;
         advanceTurnAfterPass(gs, from);
+        clearActionTimer(room);
       }
       broadcastState(roomId);
       return;
@@ -243,6 +257,7 @@ io.on('connection', (socket) => {
         room.pendingClaimers = [];
         room.lastDiscarder = null;
       }
+      clearActionTimer(room);
       broadcastState(roomId);
       return;
     }
@@ -250,6 +265,7 @@ io.on('connection', (socket) => {
     if (type === ActionType.Pong && canPong(hand, discardTile)) {
       meldFromDiscard(gs, player.seatIndex, discardTile, 2, ActionType.Pong);
       finalizeClaimTurn(gs, room, player.seatIndex);
+      clearActionTimer(room);
       broadcastState(roomId);
       return;
     }
@@ -258,6 +274,7 @@ io.on('connection', (socket) => {
       meldFromDiscard(gs, player.seatIndex, discardTile, 3, ActionType.Kong);
       drawForPlayer(gs, player.seatIndex);
       finalizeClaimTurn(gs, room, player.seatIndex);
+      clearActionTimer(room);
       broadcastState(roomId);
       return;
     }
@@ -270,6 +287,7 @@ io.on('connection', (socket) => {
         useTiles.forEach(t => removeOneTile(gs.players[player.seatIndex], t));
         gs.melds[player.seatIndex].push({ type: ActionType.Chi, tiles: [discardTile, ...useTiles] });
         finalizeClaimTurn(gs, room, player.seatIndex);
+        clearActionTimer(room);
         broadcastState(roomId);
         return;
       }
@@ -299,7 +317,20 @@ io.on('connection', (socket) => {
       return;
     }
     room.gameState = createInitialGameState();
+    room.gameState.playerAvatars = buildPlayerAvatars(room);
     broadcastState(roomId);
+  });
+
+  socket.on('setAvatar', ({ roomId, dataUrl }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    const player = room.players.find(p => p.socketId === socket.id);
+    if (!player) return;
+    room.avatars[player.seatIndex as Player] = typeof dataUrl === 'string' ? dataUrl : '';
+    if (room.gameState) {
+      room.gameState.playerAvatars[player.seatIndex as Player] = room.avatars[player.seatIndex as Player] || '';
+      broadcastState(roomId);
+    }
   });
 });
 
@@ -317,6 +348,7 @@ function broadcastState(roomId: string) {
       ...room.gameState!, 
       availableActions,
       playerNames: buildPlayerNames(room),
+      playerAvatars: buildPlayerAvatars(room),
     };
     io.to(p.socketId).emit('updateState', stateForPlayer, p.seatIndex);
   });
@@ -330,6 +362,28 @@ server.listen(PORT, HOST, () => {
 });
 
 // --- helpers ---
+
+function clearActionTimer(room: Room) {
+  if (room.actionTimer) {
+    clearTimeout(room.actionTimer);
+    room.actionTimer = null;
+  }
+}
+
+function startActionTimer(roomId: string, room: Room, fromPlayer: Player) {
+  clearActionTimer(room);
+  room.actionTimer = setTimeout(() => {
+    const gs = room.gameState;
+    if (!gs || gs.phase !== GamePhase.Action || !gs.lastDiscardedTile) return;
+    if (room.pendingClaimers.length === 0) return;
+
+    room.pendingClaimers = [];
+    room.lastDiscarder = null;
+    gs.lastDiscardedTile = null;
+    advanceTurnAfterPass(gs, fromPlayer);
+    broadcastState(roomId);
+  }, 3000);
+}
 
 function computeAvailableActions(gs: GameState, seat: Player, room: Room, includePass = true, skipPendingCheck = false): ActionType[] {
   if (gs.phase !== GamePhase.Action || !gs.lastDiscardedTile) return [];
@@ -433,4 +487,18 @@ function buildPlayerNames(room: Room): GameState['playerNames'] {
     names[p.seatIndex] = p.name || '';
   });
   return names;
+}
+
+function buildPlayerAvatars(room: Room): GameState['playerAvatars'] {
+  const avatars: GameState['playerAvatars'] = {
+    [Player.Bottom]: '',
+    [Player.Right]: '',
+    [Player.Top]: '',
+    [Player.Left]: '',
+  };
+  Object.entries(room.avatars || {}).forEach(([seat, dataUrl]) => {
+    const seatNum = Number(seat) as Player;
+    avatars[seatNum] = dataUrl || '';
+  });
+  return avatars;
 }

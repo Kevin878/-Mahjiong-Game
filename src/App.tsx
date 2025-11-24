@@ -6,6 +6,9 @@ import TileComponent from './components/TileComponent';
 import TableCenter from './components/TableCenter';
 import ActionPanel from './components/ActionPanel';
 import bgMusic from './music/never-gonna-give-you-up-official-video-4k-remaster.mp3';
+import defaultAvatar from './assets/default-avatar.svg';
+
+const ACTION_TIMEOUT_MS = 3000;
 
 // --- Types for Multiplayer ---
 interface ClientState extends GameState {
@@ -30,6 +33,7 @@ const App: React.FC = () => {
   const [playerName, setPlayerName] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [musicError, setMusicError] = useState("");
+  const [avatarError, setAvatarError] = useState("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const shouldPlayMusic = inRoom && !!gameState;
   const [customMusicUrl, setCustomMusicUrl] = useState<string | null>(null);
@@ -37,6 +41,11 @@ const App: React.FC = () => {
   const currentAudioSrcRef = useRef<string | null>(null);
   const lobbyFileInputRef = useRef<HTMLInputElement | null>(null);
   const inGameFileInputRef = useRef<HTMLInputElement | null>(null);
+  const lobbyAvatarInputRef = useRef<HTMLInputElement | null>(null);
+  const inGameAvatarInputRef = useRef<HTMLInputElement | null>(null);
+  const [actionCountdown, setActionCountdown] = useState<number | null>(null);
+  const actionDeadlineRef = useRef<number | null>(null);
+  const [avatarDataUrl, setAvatarDataUrl] = useState<string>("");
 
   // --- Socket Event Listeners ---
   useEffect(() => {
@@ -156,6 +165,68 @@ const App: React.FC = () => {
   };
 
   const currentMusicLabel = customMusicName || "Never Gonna Give You Up（預設）";
+
+  const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setAvatarError("請選擇圖片檔作為大頭貼");
+      return;
+    }
+    setAvatarError("");
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setAvatarDataUrl(reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const resetAvatar = () => {
+    setAvatarDataUrl("");
+    setAvatarError("");
+    if (lobbyAvatarInputRef.current) lobbyAvatarInputRef.current.value = "";
+    if (inGameAvatarInputRef.current) inGameAvatarInputRef.current.value = "";
+  };
+
+  useEffect(() => {
+    if (!inRoom || !socket.connected) return;
+    socket.emit('setAvatar', { roomId, dataUrl: avatarDataUrl || '' });
+  }, [avatarDataUrl, inRoom, roomId]);
+
+  const getPlayerAvatar = (relativePos: Player): string => {
+    const abs = getAbsolutePlayerFromRelative(relativePos);
+    if (abs === null) return defaultAvatar;
+    const fromState = gameState?.playerAvatars?.[abs];
+    return fromState && fromState.length > 0 ? fromState : defaultAvatar;
+  };
+
+  // --- Action countdown timer (client-side indicator) ---
+  useEffect(() => {
+    if (gameState?.phase === GamePhase.Action && gameState.lastDiscardedTile) {
+      actionDeadlineRef.current = Date.now() + ACTION_TIMEOUT_MS;
+    } else {
+      actionDeadlineRef.current = null;
+      setActionCountdown(null);
+      return;
+    }
+
+    const tick = () => {
+      if (!actionDeadlineRef.current) return;
+      const remainingMs = actionDeadlineRef.current - Date.now();
+      if (remainingMs <= 0) {
+        setActionCountdown(0);
+        actionDeadlineRef.current = null;
+        return;
+      }
+      setActionCountdown(Math.ceil(remainingMs / 1000));
+    };
+
+    tick();
+    const intervalId = window.setInterval(tick, 200);
+    return () => window.clearInterval(intervalId);
+  }, [gameState?.phase, gameState?.lastDiscardedTile?.tile.id, gameState?.turnCount]);
 
   // --- Actions ---
 
@@ -396,16 +467,41 @@ const App: React.FC = () => {
                 placeholder="Room ID"
               />
             </div>
-            
-            <div className="border-t border-slate-700 pt-4">
-              <div className="flex items-center justify-between mb-2">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="block text-sm text-gray-400">大頭貼</label>
+                <button 
+                  onClick={resetAvatar}
+                  className="text-xs px-3 py-1 rounded bg-slate-700 hover:bg-slate-600"
+                >
+                  使用預設大頭貼
+                </button>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-full overflow-hidden border border-slate-600 bg-slate-700 shrink-0">
+                  <img src={avatarDataUrl || defaultAvatar} alt="avatar preview" className="w-full h-full object-cover" />
+                </div>
+                <div className="flex-1 space-y-1.5">
+                  <input 
+                    type="file" 
+                    accept="image/*" 
+                    onChange={handleAvatarUpload}
+                    ref={lobbyAvatarInputRef}
+                    className="w-full text-sm text-gray-300 file:mr-3 file:px-3 file:py-2 file:rounded file:border-0 file:bg-indigo-700 file:text-white hover:file:bg-indigo-600"
+                  />
+                  {avatarError && <div className="text-red-400 text-xs">{avatarError}</div>}
+                </div>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
                 <label className="block text-sm text-gray-400">背景音樂</label>
                 <button 
                   onClick={resetMusic}
                   disabled={!customMusicUrl}
                   className="text-xs px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  使用預設
+                  使用預設音樂
                 </button>
               </div>
               <input 
@@ -415,8 +511,8 @@ const App: React.FC = () => {
                 ref={lobbyFileInputRef}
                 className="w-full text-sm text-gray-300 file:mr-3 file:px-3 file:py-2 file:rounded file:border-0 file:bg-green-700 file:text-white hover:file:bg-green-600"
               />
-              {musicError && <div className="text-red-400 text-xs mt-1">{musicError}</div>}
-              <div className="mt-2 text-xs text-gray-400 line-clamp-1">目前：{currentMusicLabel}</div>
+              {musicError && <div className="text-red-400 text-xs">{musicError}</div>}
+              <div className="text-xs text-gray-400 line-clamp-1">目前：{currentMusicLabel}</div>
             </div>
             
             {errorMsg && <div className="text-red-400 text-sm">{errorMsg}</div>}
@@ -480,44 +576,84 @@ const App: React.FC = () => {
           Room: {roomId} | You: {playerName}
        </div>
        <div className="absolute top-4 right-4 z-50 text-xs text-white">
-          <div className="bg-black/50 border border-white/10 rounded-lg px-3 py-2 flex flex-col gap-1 shadow">
-            <div className="text-white/70">背景音樂</div>
-            <div className="text-white line-clamp-1 max-w-[180px]" title={currentMusicLabel}>{currentMusicLabel}</div>
+          <div className="bg-black/50 border border-white/10 rounded-lg px-3 py-2 flex flex-col gap-2 shadow min-w-[220px]">
             <div className="flex items-center gap-2">
-              <label className="px-2 py-1 rounded bg-green-700 hover:bg-green-600 cursor-pointer text-[11px]">
-                重新選擇
-                <input 
-                  type="file" 
-                  accept="audio/mpeg,audio/mp3,audio/*" 
-                  onChange={handleMusicUpload} 
-                  ref={inGameFileInputRef}
-                  className="hidden" 
-                />
-              </label>
-              <button 
-                onClick={resetMusic} 
-                disabled={!customMusicUrl}
-                className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                預設
-              </button>
+              <div className="w-10 h-10 rounded-full overflow-hidden border border-white/20 bg-slate-700 shrink-0">
+                <img src={avatarDataUrl || defaultAvatar} alt="avatar preview" className="w-full h-full object-cover" />
+              </div>
+              <div className="flex-1">
+                <div className="text-white/70">我的大頭貼</div>
+                <div className="flex items-center gap-2 mt-1">
+                  <label className="px-2 py-1 rounded bg-indigo-700 hover:bg-indigo-600 cursor-pointer text-[11px]">
+                    重新選擇
+                    <input 
+                      type="file" 
+                      accept="image/*" 
+                      onChange={handleAvatarUpload} 
+                      ref={inGameAvatarInputRef}
+                      className="hidden" 
+                    />
+                  </label>
+                  <button 
+                    onClick={resetAvatar} 
+                    className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-[11px]"
+                  >
+                    預設
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="border-t border-white/10 pt-2 space-y-1">
+              <div className="text-white/70">背景音樂</div>
+              <div className="text-white line-clamp-1 max-w-[180px]" title={currentMusicLabel}>{currentMusicLabel}</div>
+              <div className="flex items-center gap-2">
+                <label className="px-2 py-1 rounded bg-green-700 hover:bg-green-600 cursor-pointer text-[11px]">
+                  重新選擇
+                  <input 
+                    type="file" 
+                    accept="audio/mpeg,audio/mp3,audio/*" 
+                    onChange={handleMusicUpload} 
+                    ref={inGameFileInputRef}
+                    className="hidden" 
+                  />
+                </label>
+                <button 
+                  onClick={resetMusic} 
+                  disabled={!customMusicUrl}
+                  className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  預設
+                </button>
+              </div>
             </div>
           </div>
        </div>
        
        {/* Player name overlays (rotated to your perspective) */}
        <div className="absolute inset-0 pointer-events-none z-40 text-white">
-         <div className="absolute bottom-28 left-1/2 -translate-x-1/2 px-3 py-1 rounded-lg bg-black/50 border border-white/10">
-           {getPlayerLabel(Player.Bottom)}
+         <div className="absolute left-1/2 top-[62%] -translate-x-1/2 flex flex-col items-center gap-1">
+           <img src={getPlayerAvatar(Player.Bottom)} alt="avatar bottom" className="w-12 h-12 rounded-full border border-white/20 bg-slate-800 object-cover" />
+           <div className="px-3 py-1 rounded-lg bg-black/50 border border-white/10">
+             {getPlayerLabel(Player.Bottom)}
+           </div>
          </div>
-         <div className="absolute top-6 left-1/2 -translate-x-1/2 px-3 py-1 rounded-lg bg-black/50 border border-white/10">
-           {getPlayerLabel(Player.Top)}
+         <div className="absolute left-1/2 top-[32%] -translate-x-1/2 flex flex-col items-center gap-1">
+           <img src={getPlayerAvatar(Player.Top)} alt="avatar top" className="w-12 h-12 rounded-full border border-white/20 bg-slate-800 object-cover" />
+           <div className="px-3 py-1 rounded-lg bg-black/50 border border-white/10">
+             {getPlayerLabel(Player.Top)}
+           </div>
          </div>
-         <div className="absolute left-6 top-1/2 -translate-y-1/2 px-3 py-1 rounded-lg bg-black/50 border border-white/10">
-           {getPlayerLabel(Player.Left)}
+         <div className="absolute left-[30%] top-1/2 -translate-y-1/2 flex flex-col items-center gap-1">
+           <img src={getPlayerAvatar(Player.Left)} alt="avatar left" className="w-12 h-12 rounded-full border border-white/20 bg-slate-800 object-cover" />
+           <div className="px-3 py-1 rounded-lg bg-black/50 border border-white/10">
+             {getPlayerLabel(Player.Left)}
+           </div>
          </div>
-         <div className="absolute right-6 top-1/2 -translate-y-1/2 px-3 py-1 rounded-lg bg-black/50 border border-white/10">
-           {getPlayerLabel(Player.Right)}
+         <div className="absolute right-[30%] top-1/2 -translate-y-1/2 flex flex-col items-center gap-1">
+           <img src={getPlayerAvatar(Player.Right)} alt="avatar right" className="w-12 h-12 rounded-full border border-white/20 bg-slate-800 object-cover" />
+           <div className="px-3 py-1 rounded-lg bg-black/50 border border-white/10">
+             {getPlayerLabel(Player.Right)}
+           </div>
          </div>
        </div>
 
@@ -526,7 +662,7 @@ const App: React.FC = () => {
          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-40">
            <div className="px-4 py-3 bg-black/70 text-white rounded-2xl text-base md:text-lg shadow-lg border border-white/10 backdrop-blur-sm">
              {gameState.phase === GamePhase.Action && gameState.lastDiscardedTile
-               ? '請等待玩家進行操作'
+               ? `請等待玩家進行吃、碰、槓操作，倒數 ${actionCountdown ?? Math.ceil(ACTION_TIMEOUT_MS / 1000)} 秒`
                : currentPlayerAbs !== null
                  ? (currentPlayerAbs === gameState.myPlayerId
                       ? '現在輪到你出牌'

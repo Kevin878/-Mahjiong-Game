@@ -55,6 +55,7 @@ export interface GameState {
     [key in Player]: Tile[];
   };
   playerNames: { [key in Player]: string };
+  playerAvatars: { [key in Player]: string }; // data URL or empty for default
   currentPlayer: Player;
   phase: GamePhase;
   winner: Player | null;
