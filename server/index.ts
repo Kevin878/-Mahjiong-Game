@@ -299,8 +299,7 @@ io.on('connection', (socket) => {
     Object.values(rooms).forEach(room => {
       const idx = room.players.findIndex(p => p.socketId === socket.id);
       if (idx !== -1) {
-        // Any player leaves: disconnect everyone else and remove the room
-        room.players.splice(idx, 1);
+        // 只要有任一玩家離線，就讓房間其他玩家也斷線並清除房間
         room.players.forEach(p => {
           io.to(p.socketId).disconnectSockets(true);
         });
